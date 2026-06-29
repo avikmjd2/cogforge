@@ -17,3 +17,6 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/avikmjd2/cogforge"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cogforge"]
