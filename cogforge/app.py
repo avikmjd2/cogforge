@@ -1,14 +1,15 @@
 import numpy as np
 
 class Tensor:
-    def __init__(self, array,children=(),requires_grad = True):
-        self.data = np.asarray(array, dtype=float)
+    def __init__(self, array,children=(),requires_grad = True,typed="compressed"):
+        self.data = np.asarray(array, dtype=np.float32 if typed == "compressed" else np.float64)
         self.shape = self.data.shape
         self.requires_grad = requires_grad
         # if self.requires_grad:
-        self.grad = np.zeros(self.shape)
+        self.grad = np.zeros(self.shape,dtype=np.float32 if typed == "compressed" else np.float64)
         self._backwards = lambda:None
         self._children = set(children)
+        self.typed = typed
         
     def __getitem__(self, key):
         out_data = self.data[key]
@@ -221,7 +222,7 @@ class Tensor:
             
         topoSort(self)
         
-        self.grad = np.ones(self.shape)
+        self.grad = np.ones(self.shape,dtype=np.float32 if self.typed == "compressed" else np.float64)
         
         for node in reversed(topo):
             node._backwards()
@@ -244,7 +245,7 @@ class Tensor:
             for child in node._children:
                 stack.append((child,False))
                 
-        self.grad = np.ones(self.shape)
+        self.grad = np.ones(self.shape,dtype=np.float32 if self.typed == "compressed" else np.float64)
         
         for node in reversed(topo):
             node._backwards()
@@ -306,6 +307,22 @@ class Tensor:
             grad = grad * mask                              # <-- padded rows get exactly zero gradient
             predictions.grad += grad * loss.grad
 
+        loss._backwards = _backward
+        return loss
+
+    @classmethod
+    def sparse_softmax_cross_entropy(cls, scores, target_ids):
+        """ scores: (B, T, V) logits ; target_ids: (B, T) int """
+        z = scores.data - scores.data.max(axis=-1, keepdims=True)
+        e = np.exp(z)
+        p = e / e.sum(axis=-1, keepdims=True)
+        N = int(np.prod(scores.shape[:-1]))
+        flat, idx, rows = p.reshape(N, -1), target_ids.reshape(N), np.arange(N)
+        loss = cls(-np.log(np.clip(flat[rows, idx], 1e-15, 1.0)).sum() / N, children=(scores,))
+        def _backward():
+            g = p.reshape(N, -1).copy()
+            g[rows, idx] -= 1.0                      # (softmax - onehot)
+            scores.grad += (g.reshape(scores.shape) / N) * loss.grad
         loss._backwards = _backward
         return loss
     
@@ -860,5 +877,4 @@ class PositionalEncoding:
     
     def parameters(self):
         return []
-        
-        
+ 
