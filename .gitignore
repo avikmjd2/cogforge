@@ -1,0 +1,12 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Build folders (created by PyPI later)
+dist/
+build/
+*.egg-info/
+
+# Saved Model Weights
+*.npz
+*.pt

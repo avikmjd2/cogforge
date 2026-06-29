@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cogforge" 
+version = "0.1.0"
+authors = [
+  { name="Avik Majumder", email="avikmjd2@gmail.com" },
+]
+description = "A custom autograd engine and Transformer block built from scratch."
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.20.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-username/my_grad_project"
