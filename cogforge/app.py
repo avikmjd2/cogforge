@@ -1,6 +1,6 @@
 import numpy
 from . import backend
-# from backend import np,USE_GPU,NO_GRAD,_NUMEXPR_AVAILABLE,USE_NUMEXPR,_ne,_cp
+
 
 def to_cpu(a):
     """Return a numpy array regardless of backend."""
@@ -75,7 +75,7 @@ class Tensor:
         arrays = tuple(t.data for t in tensors)
         out = Tensor(backend.np.concatenate(arrays,axis=axis),children=tensors)
         sizes = [a.shape[axis] for a in arrays[:-1]]
-        split_indices = backend.np.cumsum(sizes)
+        split_indices = numpy.cumsum(sizes).tolist()
         
         
         def _backward():
@@ -383,7 +383,7 @@ class Tensor:
         z = scores.data - scores.data.max(axis=-1, keepdims=True)
         e = backend.np.exp(z)
         p = e / e.sum(axis=-1, keepdims=True)
-        N = int(backend.np.prod(scores.shape[:-1]))
+        N = int(numpy.prod(scores.shape[:-1]))
         flat, idx, rows = p.reshape(N, -1), target_ids.reshape(N), backend.np.arange(N)
         loss = cls(-backend.np.log(backend.np.clip(flat[rows, idx], 1e-15, 1.0)).sum() / N, children=(scores,))
         def _backward():
@@ -397,7 +397,7 @@ class Tensor:
     @classmethod
     def sparse_softmax_cross_entropy(cls, scores, target_ids):
         p = _stable_softmax(scores.data)
-        N = int(backend.np.prod(scores.shape[:-1]))
+        N = int(numpy.prod(scores.shape[:-1]))
         flat, idx, rows = p.reshape(N, -1), target_ids.reshape(N), backend.np.arange(N)
         loss = cls(-backend.np.log(backend.np.clip(flat[rows, idx], 1e-15, 1.0)).sum() / N, children=(scores,))
         def _backward():
@@ -429,7 +429,7 @@ class Tensor:
         z = z - z.max(axis=-1, keepdims=True)          
         e = backend.np.exp(z)
         p = e / e.sum(axis=-1, keepdims=True)
-        N = backend.np.prod(scores.shape[:-1])                  # B for 2D, B*T for 3D
+        N = numpy.prod(scores.shape[:-1])                  # B for 2D, B*T for 3D
         loss = cls(-backend.np.sum(targets * backend.np.log(backend.np.clip(p, 1e-15, 1.0))) / N, children=(scores,))
         def _backward():
             scores.grad += (p - targets) / N * loss.grad
@@ -459,7 +459,8 @@ class Tensor:
     
     def transpose(self,axes):
         out = Tensor(backend.np.transpose(self.data,axes=axes),children=(self,))
-        inv = backend.np.argsort(axes)
+        # inv = backend.np.argsort(axes)
+        inv = tuple(int(i) for i in numpy.argsort(axes)) 
         def _backward():
             self.grad+=backend.np.transpose(out.grad,inv)
             
@@ -707,7 +708,7 @@ class BatchNorm1D:
             self.std_inv = 1.0 / backend.np.sqrt(var + self.eps)
             self.x_hat = self.x_centered * self.std_inv
             
-            N = backend.np.prod([x.data.shape[d] for d in reduce_dims])
+            N = numpy.prod([x.data.shape[d] for d in reduce_dims])
             unbiased_var = var.squeeze() * (N / (N - 1)) if N > 1 else var.squeeze()
             
             self.running_mean = (1 - self.momentum) * self.running_mean + self.momentum * mean.squeeze()
@@ -728,7 +729,7 @@ class BatchNorm1D:
             self.gamma.grad += backend.np.sum(dout * self.x_hat, axis=reduce_dims)
             self.beta.grad += backend.np.sum(dout, axis=reduce_dims)
             
-            N = backend.np.prod([x.data.shape[d] for d in reduce_dims])
+            N = numpy.prod([x.data.shape[d] for d in reduce_dims])
 
             dx_hat = dout * self.gamma.data
             dx = (1.0 / N) * self.std_inv * (
