@@ -1,5 +1,7 @@
 from . import backend
-from .app import Embedding, PositionalEncoding,Transformer,LayerNorm,Linear,RotatoryPositionalEncoding
+from .app import Embedding, PositionalEncoding,Transformer,LayerNorm,Linear,RotatoryPositionalEncoding,to_cpu
+import numpy
+
 
 class GPTV1:
     def __init__(self, vocab, d_model, n_heads, n_layers, max_len, d_ff=None):
@@ -26,21 +28,18 @@ class GPTV1:
         return ps
     
     def generate(self, idx, n_new, temperature=1.0, top_k=None):
-        """
-        idx: (B, T) int array — the prompt (B is usually 1)
-        returns: (B, T + n_new) int array
-        """
+        idx = numpy.asarray(idx)
         for _ in range(n_new):
-            cond = idx[:, -self.max_len:]                    # crop to context window
-            logits = self(cond).data[:, -1, :] / temperature # (B, V) — last position only
+            cond = idx[:, -self.max_len:]
+            logits = to_cpu(self(cond).data)[:, -1, :] / temperature
             if top_k is not None:
-                kth = backend.np.sort(logits, axis=-1)[:, -top_k][:, None]
-                logits = backend.np.where(logits < kth, -1e9, logits)  # keep only top-k choices
+                kth = numpy.sort(logits, axis=-1)[:, -top_k][:, None]
+                logits = numpy.where(logits < kth, -1e9, logits)
             z = logits - logits.max(-1, keepdims=True)
-            p = backend.np.exp(z).astype(backend.np.float64); p /= p.sum(-1, keepdims=True)     # softmax → probabilities
-            nxt = backend.np.array([[backend.np.random.choice(len(pr), p=pr)] for pr in p])  # sample
-            idx = backend.np.concatenate([idx, nxt], axis=1)         # append, feed back in
-        return idx                                            # <-- was a bare `return` 
+            p = numpy.exp(z).astype(numpy.float64); p /= p.sum(-1, keepdims=True)
+            nxt = numpy.array([[numpy.random.choice(len(pr), p=pr)] for pr in p])
+            idx = numpy.concatenate([idx, nxt], axis=1)
+        return idx                                          # <-- was a bare `return` 
         
         
         
@@ -71,18 +70,15 @@ class GPT2:
         return ps   
     
     def generate(self, idx, n_new, temperature=1.0, top_k=None):
-        """
-        idx: (B, T) int array — the prompt (B is usually 1)
-        returns: (B, T + n_new) int array
-        """
+        idx = numpy.asarray(idx)                                 # token ids live on host
         for _ in range(n_new):
-            cond = idx[:, -self.max_len:]                    # crop to context window
-            logits = self(cond).data[:, -1, :] / temperature # (B, V) — last position only
+            cond = idx[:, -self.max_len:]
+            logits = to_cpu(self(cond).data)[:, -1, :] / temperature   # forward on GPU, logits to host
             if top_k is not None:
-                kth = backend.np.sort(logits, axis=-1)[:, -top_k][:, None]
-                logits = backend.np.where(logits < kth, -1e9, logits)  # keep only top-k choices
+                kth = numpy.sort(logits, axis=-1)[:, -top_k][:, None]
+                logits = numpy.where(logits < kth, -1e9, logits)
             z = logits - logits.max(-1, keepdims=True)
-            p = backend.np.exp(z).astype(backend.np.float64); p /= p.sum(-1, keepdims=True)     # softmax → probabilities
-            nxt = backend.np.array([[backend.np.random.choice(len(pr), p=pr)] for pr in p])  # sample
-            idx = backend.np.concatenate([idx, nxt], axis=1)         # append, feed back in
-        return idx                               
+            p = numpy.exp(z).astype(numpy.float64); p /= p.sum(-1, keepdims=True)
+            nxt = numpy.array([[numpy.random.choice(len(pr), p=pr)] for pr in p])
+            idx = numpy.concatenate([idx, nxt], axis=1)
+        return idx                              
