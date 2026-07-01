@@ -1,4 +1,4 @@
-import backend
+from . import backend
 from app import Embedding, PositionalEncoding,Transformer,LayerNorm,Linear,RotatoryPositionalEncoding
 
 class GPTV1:

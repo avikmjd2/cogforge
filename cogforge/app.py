@@ -1,5 +1,5 @@
 import numpy
-import backend
+from . import backend
 # from backend import np,USE_GPU,NO_GRAD,_NUMEXPR_AVAILABLE,USE_NUMEXPR,_ne,_cp
 
 def to_cpu(a):
