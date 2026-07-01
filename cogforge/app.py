@@ -316,6 +316,9 @@ class Tensor:
         
         for node in reversed(topo):
             node._backwards()
+            #TRIAL
+            node._backwards = lambda: None
+            node._children.clear()
                     
             
     def flatten(self):

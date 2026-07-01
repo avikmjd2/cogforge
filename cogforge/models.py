@@ -81,4 +81,5 @@ class GPT2:
             p = numpy.exp(z).astype(numpy.float64); p /= p.sum(-1, keepdims=True)
             nxt = numpy.array([[numpy.random.choice(len(pr), p=pr)] for pr in p])
             idx = numpy.concatenate([idx, nxt], axis=1)
+            # backend._cp.get_default_memory_pool().free_all_blocks() if backend.USE_GPU else None
         return idx                              
