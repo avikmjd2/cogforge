@@ -1,5 +1,5 @@
 from . import backend
-from app import Embedding, PositionalEncoding,Transformer,LayerNorm,Linear,RotatoryPositionalEncoding
+from .app import Embedding, PositionalEncoding,Transformer,LayerNorm,Linear,RotatoryPositionalEncoding
 
 class GPTV1:
     def __init__(self, vocab, d_model, n_heads, n_layers, max_len, d_ff=None):
