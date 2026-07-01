@@ -1,12 +1,55 @@
-import numpy as np
+import numpy
+import backend
+# from backend import np,USE_GPU,NO_GRAD,_NUMEXPR_AVAILABLE,USE_NUMEXPR,_ne,_cp
+
+def to_cpu(a):
+    """Return a numpy array regardless of backend."""
+    return backend._cp.asnumpy(a) if (backend.USE_GPU and backend._cp is not None) else numpy.asarray(a)
+
+def scatter_add(target, indices, values):
+    """target[indices] += values."""
+    if backend.USE_GPU:
+        import cupyx
+        cupyx.scatter_add(target, indices, values)
+    else:
+        numpy.add.at(target, indices, values)
+
+
+def set_numexpr(enabled, threads=None):
+    """User switch: set_numexpr(True, threads=8) or set_numexpr(False)."""
+    # global USE_NUMEXPR
+    if enabled and not backend._NUMEXPR_AVAILABLE:
+        raise RuntimeError("numexpr not installed — run: pip install numexpr")
+    backend.USE_NUMEXPR = bool(enabled)
+    if backend.USE_NUMEXPR and threads:
+        backend._ne.set_num_threads(threads)
+    return backend.USE_NUMEXPR
+
+def _stable_softmax(sd):
+    mx = sd.max(axis=-1, keepdims=True)          # reduction stays numpy
+    if backend.USE_NUMEXPR and not backend.USE_GPU:
+        e = backend._ne.evaluate("exp(sd - mx)")
+        s = e.sum(axis=-1, keepdims=True)
+        return backend._ne.evaluate("e / s")
+    e = backend.np.exp(sd - mx)
+    return e / e.sum(axis=-1, keepdims=True)
+
+def _iadd_scaled(dst, src, coef):                # dst += src * coef, in place
+    if backend.USE_NUMEXPR and not backend.USE_GPU:
+        backend._ne.evaluate("dst + src * coef", out=dst)
+    else:
+        dst += src * coef    
+        
+def needGradientHence(state:bool):
+    backend.NO_GRAD = not state
 
 class Tensor:
     def __init__(self, array,children=(),requires_grad = True,typed="compressed"):
-        self.data = np.asarray(array, dtype=np.float32 if typed == "compressed" else np.float64)
+        self.data = backend.np.asarray(array, dtype=backend.np.float32 if typed == "compressed" else backend.np.float64)
         self.shape = self.data.shape
         self.requires_grad = requires_grad
         # if self.requires_grad:
-        self.grad = np.zeros(self.shape,dtype=np.float32 if typed == "compressed" else np.float64)
+        self.grad = None if backend.NO_GRAD else backend.np.zeros(self.shape,dtype=backend.np.float32 if typed == "compressed" else backend.np.float64)
         self._backwards = lambda:None
         self._children = set(children)
         self.typed = typed
@@ -18,10 +61,34 @@ class Tensor:
         
         def _backward():
             self.grad[key] += out.grad
+            # backend.np.add.at(self.grad, key, out.grad)
             
         out._backwards = _backward
         
         return out
+    
+    @classmethod
+    def cat(cls,tensors:tuple,axis=-1):
+        """
+        Concatenates a sequence of Tensors along a specified axis.
+        """
+        arrays = tuple(t.data for t in tensors)
+        out = Tensor(backend.np.concatenate(arrays,axis=axis),children=tensors)
+        sizes = [a.shape[axis] for a in arrays[:-1]]
+        split_indices = backend.np.cumsum(sizes)
+        
+        
+        def _backward():
+            split_grads = backend.np.split(out.grad, split_indices, axis=axis)
+            
+            for t,g in zip(tensors,split_grads):
+                if t.requires_grad:
+                    t.grad += g
+            
+        out._backwards = _backward
+        
+        return out
+        
         
         
     def __add__(self, other):
@@ -32,13 +99,13 @@ class Tensor:
         def _backward():
             if self.shape != out_data.shape:
                 axis = tuple(range(out.grad.ndim - self.data.ndim))
-                self.grad += np.sum(out.grad, axis=axis).reshape(self.shape)
+                self.grad += backend.np.sum(out.grad, axis=axis).reshape(self.shape)
             else:
                 self.grad += out.grad
 
             if other.shape != out_data.shape:
                 axis = tuple(range(out.grad.ndim - other.data.ndim))
-                other.grad += np.sum(out.grad, axis=axis).reshape(other.shape)
+                other.grad += backend.np.sum(out.grad, axis=axis).reshape(other.shape)
             else:
                 other.grad += out.grad
 
@@ -68,14 +135,14 @@ class Tensor:
             grad_self = other.data * out.grad
             if self.shape != out_data.shape:
                 axis = tuple(range(out.grad.ndim - self.data.ndim))
-                grad_self = np.sum(grad_self, axis=axis).reshape(self.shape)
+                grad_self = backend.np.sum(grad_self, axis=axis).reshape(self.shape)
             self.grad += grad_self
 
             # gradient w.r.t. other
             grad_other = self.data * out.grad
             if other.shape != out_data.shape:
                 axis = tuple(range(out.grad.ndim - other.data.ndim))
-                grad_other = np.sum(grad_other, axis=axis).reshape(other.shape)
+                grad_other = backend.np.sum(grad_other, axis=axis).reshape(other.shape)
             other.grad += grad_other
             
         out._backwards = _backward
@@ -90,12 +157,12 @@ class Tensor:
     #     out = Tensor(out_data, children=(self,other))
         
     #     # def _backward():
-    #     #     self.grad += out.grad @ np.transpose(other.data)
-    #     #     other.grad +=  np.transpose(self.data) @ out.grad
+    #     #     self.grad += out.grad @ backend.np.transpose(other.data)
+    #     #     other.grad +=  backend.np.transpose(self.data) @ out.grad
         
     #     def _backward():
-    #         self.grad += out.grad @ np.swapaxes(other.data, -1, -2)
-    #         other.grad += np.swapaxes(self.data, -1, -2) @ out.grad
+    #         self.grad += out.grad @ backend.np.swapaxes(other.data, -1, -2)
+    #         other.grad += backend.np.swapaxes(self.data, -1, -2) @ out.grad
         
     #     out._backwards = _backward    
     #     return out
@@ -112,15 +179,15 @@ class Tensor:
     def __matmul__(self, other):    
         out = Tensor(self.data @ other.data, children=(self, other))
         def _backward():
-            gs = out.grad @ np.swapaxes(other.data, -1, -2)
-            go = np.swapaxes(self.data, -1, -2) @ out.grad
+            gs = out.grad @ backend.np.swapaxes(other.data, -1, -2)
+            go = backend.np.swapaxes(self.data, -1, -2) @ out.grad
             self.grad  += Tensor.unbroadcast(gs, self.data.shape)
             other.grad += Tensor.unbroadcast(go, other.data.shape)
         out._backwards = _backward
         return out
     
     def relu(self):
-        out_data = np.maximum(0,self.data)
+        out_data = backend.np.maximum(0,self.data)
         
         out = Tensor(out_data, children=(self,))
         
@@ -136,7 +203,7 @@ class Tensor:
         curr_shape = self.data.shape
         
         if not self.data.flags['C_CONTIGUOUS']:
-            arr = np.ascontiguousarray(self.data)
+            arr = backend.np.ascontiguousarray(self.data)
         else:
             arr = self.data
         
@@ -154,7 +221,7 @@ class Tensor:
         
         
     def sigmoid(self):
-        out_data = 1 / (1 + np.exp(-self.data))
+        out_data = 1 / (1 + backend.np.exp(-self.data))
         out = Tensor(out_data, children=(self,))
         def _backward():
             local_derivative = out_data * (1 - out_data)
@@ -165,7 +232,7 @@ class Tensor:
         return out
     
     def tanh(self):
-        out_data = np.tanh(self.data)
+        out_data = backend.np.tanh(self.data)
         out = Tensor(out_data,children=(self,))
         def _backward():
             dervitive = 1-(out_data*out_data)
@@ -175,15 +242,15 @@ class Tensor:
         return out
     
     def softmax(self,axis=-1):
-        maxVal = np.max(self.data,axis=axis,keepdims=True)
-        expVal = np.exp(self.data-maxVal)
+        maxVal = backend.np.max(self.data,axis=axis,keepdims=True)
+        expVal = backend.np.exp(self.data-maxVal)
         
-        out_data = expVal/np.sum(expVal,axis=axis,keepdims=True)
+        out_data = expVal/backend.np.sum(expVal,axis=axis,keepdims=True)
         out=Tensor(out_data,(self,))
         
         def _backward():
             g = out.grad
-            self.grad += out_data * (g - np.sum(g * out_data, axis=axis, keepdims=True))
+            self.grad += out_data * (g - backend.np.sum(g * out_data, axis=axis, keepdims=True))
         
         out._backwards = _backward
         return out
@@ -192,10 +259,10 @@ class Tensor:
     @classmethod
     def cross_entropy_loss(cls,predictions, targets):
        
-        probabilities = np.clip(predictions.data, 1e-15, 1 - 1e-15)
+        probabilities = backend.np.clip(predictions.data, 1e-15, 1 - 1e-15)
         batch_size = predictions.shape[0]
         
-        loss_data = - np.sum(targets * np.log(probabilities)) / batch_size
+        loss_data = - backend.np.sum(targets * backend.np.log(probabilities)) / batch_size
         loss = Tensor(loss_data, children=(predictions,))
         
         def _backward():
@@ -222,7 +289,7 @@ class Tensor:
             
         topoSort(self)
         
-        self.grad = np.ones(self.shape,dtype=np.float32 if self.typed == "compressed" else np.float64)
+        self.grad = backend.np.ones(self.shape,dtype=backend.np.float32 if self.typed == "compressed" else backend.np.float64)
         
         for node in reversed(topo):
             node._backwards()
@@ -245,7 +312,7 @@ class Tensor:
             for child in node._children:
                 stack.append((child,False))
                 
-        self.grad = np.ones(self.shape,dtype=np.float32 if self.typed == "compressed" else np.float64)
+        self.grad = backend.np.ones(self.shape,dtype=backend.np.float32 if self.typed == "compressed" else backend.np.float64)
         
         for node in reversed(topo):
             node._backwards()
@@ -292,13 +359,13 @@ class Tensor:
         targets:     (B, V) one-hot
         mask:        (B,) 1.0 for real positions, 0.0 for <PAD>
         """
-        probs = np.clip(predictions.data, 1e-15, 1 - 1e-15)
+        probs = backend.np.clip(predictions.data, 1e-15, 1 - 1e-15)
         mask = mask.reshape(-1, 1)                          # (B, 1)
         n_real = mask.sum()
         n_real = n_real if n_real > 0 else 1.0
 
         # only real rows contribute to the loss value
-        loss_data = -np.sum(mask * targets * np.log(probs)) / n_real
+        loss_data = -backend.np.sum(mask * targets * backend.np.log(probs)) / n_real
         loss = cls(loss_data, children=(predictions,))
 
         def _backward():
@@ -311,18 +378,32 @@ class Tensor:
         return loss
 
     @classmethod
-    def sparse_softmax_cross_entropy(cls, scores, target_ids):
+    def sparse_softmax_cross_entropy_legacy(cls, scores, target_ids):
         """ scores: (B, T, V) logits ; target_ids: (B, T) int """
         z = scores.data - scores.data.max(axis=-1, keepdims=True)
-        e = np.exp(z)
+        e = backend.np.exp(z)
         p = e / e.sum(axis=-1, keepdims=True)
-        N = int(np.prod(scores.shape[:-1]))
-        flat, idx, rows = p.reshape(N, -1), target_ids.reshape(N), np.arange(N)
-        loss = cls(-np.log(np.clip(flat[rows, idx], 1e-15, 1.0)).sum() / N, children=(scores,))
+        N = int(backend.np.prod(scores.shape[:-1]))
+        flat, idx, rows = p.reshape(N, -1), target_ids.reshape(N), backend.np.arange(N)
+        loss = cls(-backend.np.log(backend.np.clip(flat[rows, idx], 1e-15, 1.0)).sum() / N, children=(scores,))
         def _backward():
-            g = p.reshape(N, -1).copy()
+            # g = p.reshape(N, -1).copy()
+            g = p.reshape(N, -1)
             g[rows, idx] -= 1.0                      # (softmax - onehot)
             scores.grad += (g.reshape(scores.shape) / N) * loss.grad
+        loss._backwards = _backward
+        return loss
+    
+    @classmethod
+    def sparse_softmax_cross_entropy(cls, scores, target_ids):
+        p = _stable_softmax(scores.data)
+        N = int(backend.np.prod(scores.shape[:-1]))
+        flat, idx, rows = p.reshape(N, -1), target_ids.reshape(N), backend.np.arange(N)
+        loss = cls(-backend.np.log(backend.np.clip(flat[rows, idx], 1e-15, 1.0)).sum() / N, children=(scores,))
+        def _backward():
+            g = p.reshape(N, -1)
+            g[rows, idx] -= 1.0
+            _iadd_scaled(scores.grad, g.reshape(scores.shape), backend.np.float32(loss.grad / N))
         loss._backwards = _backward
         return loss
     
@@ -331,11 +412,11 @@ class Tensor:
     def softmax_cross_entropy_old(cls, scores, targets):
         z = scores.data
         z = z - z.max(axis=1, keepdims=True)          # stability
-        e = np.exp(z)
+        e = backend.np.exp(z)
         p = e / e.sum(axis=1, keepdims=True)          # softmax, computed privately
         B = scores.shape[0]
 
-        loss = cls(-np.sum(targets * np.log(np.clip(p, 1e-15, 1.0))) / B, children=(scores,))
+        loss = cls(-backend.np.sum(targets * backend.np.log(backend.np.clip(p, 1e-15, 1.0))) / B, children=(scores,))
 
         def _backward():
             scores.grad += (p - targets) / B * loss.grad
@@ -346,10 +427,10 @@ class Tensor:
     def softmax_cross_entropy(cls, scores, targets):
         z = scores.data
         z = z - z.max(axis=-1, keepdims=True)          
-        e = np.exp(z)
+        e = backend.np.exp(z)
         p = e / e.sum(axis=-1, keepdims=True)
-        N = np.prod(scores.shape[:-1])                  # B for 2D, B*T for 3D
-        loss = cls(-np.sum(targets * np.log(np.clip(p, 1e-15, 1.0))) / N, children=(scores,))
+        N = backend.np.prod(scores.shape[:-1])                  # B for 2D, B*T for 3D
+        loss = cls(-backend.np.sum(targets * backend.np.log(backend.np.clip(p, 1e-15, 1.0))) / N, children=(scores,))
         def _backward():
             scores.grad += (p - targets) / N * loss.grad
         loss._backwards = _backward
@@ -360,14 +441,14 @@ class Tensor:
     def softmax_cross_entropy_masked(cls, scores, targets, mask):
         z = scores.data
         z = z - z.max(axis=1, keepdims=True)
-        e = np.exp(z)
+        e = backend.np.exp(z)
         p = e / e.sum(axis=1, keepdims=True)
 
         mask = mask.reshape(-1, 1)                     
         n_real = mask.sum()
         n_real = n_real if n_real > 0 else 1.0
 
-        loss = cls(-np.sum(mask * targets * np.log(np.clip(p, 1e-15, 1.0))) / n_real, children=(scores,))
+        loss = cls(-backend.np.sum(mask * targets * backend.np.log(backend.np.clip(p, 1e-15, 1.0))) / n_real, children=(scores,))
 
         def _backward():
             grad = (p - targets) / n_real
@@ -377,19 +458,19 @@ class Tensor:
         return loss
     
     def transpose(self,axes):
-        out = Tensor(np.transpose(self.data,axes=axes),children=(self,))
-        inv = np.argsort(axes)
+        out = Tensor(backend.np.transpose(self.data,axes=axes),children=(self,))
+        inv = backend.np.argsort(axes)
         def _backward():
-            self.grad+=np.transpose(out.grad,inv)
+            self.grad+=backend.np.transpose(out.grad,inv)
             
         out._backwards = _backward
         return out
     
     def masked_fill(self, mask, value):
-        out_data = np.where(mask, value, self.data)
+        out_data = backend.np.where(mask, value, self.data)
         out = Tensor(out_data, children=(self,))
         def _backward():
-            self.grad += np.where(mask, 0.0, 1.0) * out.grad
+            self.grad += backend.np.where(mask, 0.0, 1.0) * out.grad
         out._backwards = _backward
         return out
                             
@@ -398,10 +479,10 @@ class Tensor:
             
 class Linear:
     def __init__(self, nin, nout):
-        self.W = Tensor(np.random.randn(nin, nout) * np.sqrt(2.0/nin))
-        self.v_W = np.zeros(self.W.shape)
-        self.b = Tensor(np.zeros((nout,)))
-        self.v_b = np.zeros(self.b.shape)
+        self.W = Tensor(backend.np.random.randn(nin, nout) * backend.np.sqrt(2.0/nin))
+        self.v_W = backend.np.zeros(self.W.shape)
+        self.b = Tensor(backend.np.zeros((nout,)))
+        self.v_b = backend.np.zeros(self.b.shape)
         
     def __call__ (self,x):
         if(x.shape[-1]!=self.W.shape[0]):
@@ -436,10 +517,10 @@ class MLP:
             weights_dict[f'W_{i}'] = layer.W.data
             weights_dict[f'b_{i}'] = layer.b.data
             
-        np.savez_compressed(filename, **weights_dict)
+        backend.np.savez_compressed(filename, **weights_dict)
         
     def load(self, filename="best_model.npz"):
-        with np.load(filename) as data:
+        with backend.np.load(filename) as data:
             for i, layer in enumerate(self.layers):
                 layer.W.data = data[f'W_{i}']
                 layer.b.data = data[f'b_{i}']
@@ -448,15 +529,17 @@ class MLP:
         
 class Embedding:
     def __init__(self, vocab_size, embedding_dim):
-        self.weights = Tensor(np.random.randn(vocab_size, embedding_dim))
+        self.weights = Tensor(backend.np.random.randn(vocab_size, embedding_dim))
         
     def __call__(self, input_indices):
-        out_data = self.weights.data[input_indices]
+        idx = backend.np.asarray(input_indices)   
+        out_data = self.weights.data[idx]
         
         out = Tensor(out_data, children=(self.weights,))
         
         def _backward():
-            np.add.at(self.weights.grad,input_indices,out.grad)
+            # backend.np.add.at(self.weights.grad,input_indices,out.grad)
+            scatter_add(self.weights.grad, idx, out.grad)
         
         out._backwards = _backward
         return out
@@ -500,7 +583,7 @@ class RNN:
             h = prev_hidden
         else:
             B = xs[0].shape[0]
-            h = Tensor(np.zeros((B, self.hidden_dim)))
+            h = Tensor(backend.np.zeros((B, self.hidden_dim)))
         
         
         hidden_states = []
@@ -556,7 +639,7 @@ class SGD:
         self.lr = learning_rate
         
     def clip_grads(self, max_norm=5.0):
-        total = np.sqrt(sum(np.sum(p.grad ** 2) for p in self.parameters))
+        total = backend.np.sqrt(sum(backend.np.sum(p.grad ** 2) for p in self.parameters))
         if total > max_norm:
             scale = max_norm / (total + 1e-6)
             for p in self.parameters:
@@ -568,7 +651,7 @@ class SGD:
             
     def zero_grad(self):
         for p in self.parameters:
-            p.grad = np.zeros_like(p.grad)
+            p.grad = backend.np.zeros_like(p.grad)
             
 class Sequential:
     def __init__(self,layers):
@@ -606,11 +689,11 @@ class BatchNorm1D:
         self.momentum = momentum
         self.training = True
         
-        self.gamma = Tensor(np.ones(dim))
-        self.beta = Tensor(np.zeros(dim))
+        self.gamma = Tensor(backend.np.ones(dim))
+        self.beta = Tensor(backend.np.zeros(dim))
         
-        self.running_mean = np.zeros(dim)
-        self.running_var = np.ones(dim)
+        self.running_mean = backend.np.zeros(dim)
+        self.running_var = backend.np.ones(dim)
         
     
     def __call__(self,x:Tensor):
@@ -621,17 +704,17 @@ class BatchNorm1D:
             var = x.data.var(axis=reduce_dims, keepdims=True)
             
             self.x_centered = x.data - mean
-            self.std_inv = 1.0 / np.sqrt(var + self.eps)
+            self.std_inv = 1.0 / backend.np.sqrt(var + self.eps)
             self.x_hat = self.x_centered * self.std_inv
             
-            N = np.prod([x.data.shape[d] for d in reduce_dims])
+            N = backend.np.prod([x.data.shape[d] for d in reduce_dims])
             unbiased_var = var.squeeze() * (N / (N - 1)) if N > 1 else var.squeeze()
             
             self.running_mean = (1 - self.momentum) * self.running_mean + self.momentum * mean.squeeze()
             self.running_var = (1 - self.momentum) * self.running_var + self.momentum * unbiased_var
             
         else:
-            self.x_hat = (x.data-self.running_mean)/np.sqrt(self.running_var + self.eps)
+            self.x_hat = (x.data-self.running_mean)/backend.np.sqrt(self.running_var + self.eps)
         
         out_data = self.gamma.data * self.x_hat + self.beta.data
         
@@ -642,16 +725,16 @@ class BatchNorm1D:
                 return
             
             dout = out.grad
-            self.gamma.grad += np.sum(dout * self.x_hat, axis=reduce_dims)
-            self.beta.grad += np.sum(dout, axis=reduce_dims)
+            self.gamma.grad += backend.np.sum(dout * self.x_hat, axis=reduce_dims)
+            self.beta.grad += backend.np.sum(dout, axis=reduce_dims)
             
-            N = np.prod([x.data.shape[d] for d in reduce_dims])
+            N = backend.np.prod([x.data.shape[d] for d in reduce_dims])
 
             dx_hat = dout * self.gamma.data
             dx = (1.0 / N) * self.std_inv * (
                 N * dx_hat 
-                - np.sum(dx_hat, axis=reduce_dims, keepdims=True) 
-                - self.x_hat * np.sum(dx_hat * self.x_hat, axis=reduce_dims, keepdims=True)
+                - backend.np.sum(dx_hat, axis=reduce_dims, keepdims=True) 
+                - self.x_hat * backend.np.sum(dx_hat * self.x_hat, axis=reduce_dims, keepdims=True)
             )
 
             x.grad += dx
@@ -724,8 +807,8 @@ class Adam:
     def __init__(self, parameters, lr=1e-3, beta1=0.9, beta2=0.999, eps=1e-8):
         self.parameters = parameters
         self.lr = lr; self.beta1 = beta1; self.beta2 = beta2; self.eps = eps
-        self.m = [np.zeros_like(p.data) for p in parameters]
-        self.v = [np.zeros_like(p.data) for p in parameters]
+        self.m = [backend.np.zeros_like(p.data) for p in parameters]
+        self.v = [backend.np.zeros_like(p.data) for p in parameters]
         self.t = 0
 
     def step(self):
@@ -735,14 +818,14 @@ class Adam:
             self.v[i] = self.beta2*self.v[i] + (1-self.beta2)*(p.grad**2)
             m_hat = self.m[i] / (1 - self.beta1**self.t)
             v_hat = self.v[i] / (1 - self.beta2**self.t)
-            p.data -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
+            p.data -= self.lr * m_hat / (backend.np.sqrt(v_hat) + self.eps)
 
     def zero_grad(self):
         for p in self.parameters:
-            p.grad = np.zeros_like(p.grad)
+            p.grad = backend.np.zeros_like(p.grad)
 
     def clip_grads(self, max_norm=5.0):
-        total = np.sqrt(sum(np.sum(p.grad**2) for p in self.parameters))
+        total = backend.np.sqrt(sum(backend.np.sum(p.grad**2) for p in self.parameters))
         if total > max_norm:
             scale = max_norm / (total + 1e-6)
             for p in self.parameters:
@@ -751,7 +834,7 @@ class Adam:
                 
 class Attention:
     def __init__(self,dk):
-        self.scale = 1.0/np.sqrt(dk)
+        self.scale = 1.0/backend.np.sqrt(dk)
     
     def __call__(self, Q:Tensor,K:Tensor,V:Tensor,mask=None):
         axes = list(range(Q.data.ndim)); axes[-1], axes[-2] = axes[-2], axes[-1]
@@ -765,12 +848,13 @@ class Attention:
         return intermediate @ V
         
 class MultiHeadAttention:
-    def __init__(self,dinp,dmodel, dout,n):
+    def __init__(self,dinp,dmodel, dout,n,rope=None):
         assert dmodel%n==0
         self.h = n
         self.dk = dmodel//n
         self.q = Linear(dinp,dmodel) #dmodel = dk*h, we will slice it 
         self.k = Linear(dinp,dmodel)
+        self.rope = rope
         self.v = Linear(dinp,dmodel)
         self.o = Linear(dmodel,dout)
         self.attention = Attention(self.dk)
@@ -787,6 +871,9 @@ class MultiHeadAttention:
         Q = self.split(self.q(query))
         K = self.split(self.k(key))
         V = self.split(self.v(value))
+        if self.rope is not None:
+            Q = self.rope(Q)
+            K = self.rope(K)
         out = self.attention(Q=Q,K=K,V=V,mask=mask)
         return self.o(self.merge(out))
     
@@ -798,13 +885,13 @@ class MultiHeadAttention:
 class LayerNorm:
     def __init__(self, dim, eps=1e-5):
         self.eps = eps
-        self.gamma = Tensor(np.ones(dim))      
-        self.beta  = Tensor(np.zeros(dim))     
+        self.gamma = Tensor(backend.np.ones(dim))      
+        self.beta  = Tensor(backend.np.zeros(dim))     
 
     def __call__(self, x):
         mu  = x.data.mean(axis=-1, keepdims=True)
         var = x.data.var(axis=-1, keepdims=True)
-        std_inv = 1.0 / np.sqrt(var + self.eps)
+        std_inv = 1.0 / backend.np.sqrt(var + self.eps)
         x_hat = (x.data - mu) * std_inv
         out_data = self.gamma.data * x_hat + self.beta.data
         out = Tensor(out_data, children=(x, self.gamma, self.beta))
@@ -813,13 +900,13 @@ class LayerNorm:
         def _backward():
             dout = out.grad
             axes = tuple(range(dout.ndim - 1))            
-            self.gamma.grad += np.sum(dout * x_hat, axis=axes)
-            self.beta.grad  += np.sum(dout, axis=axes)
+            self.gamma.grad += backend.np.sum(dout * x_hat, axis=axes)
+            self.beta.grad  += backend.np.sum(dout, axis=axes)
             dxhat = dout * self.gamma.data
             dx = std_inv / D * (
                 D * dxhat
-                - np.sum(dxhat, axis=-1, keepdims=True)
-                - x_hat * np.sum(dxhat * x_hat, axis=-1, keepdims=True)
+                - backend.np.sum(dxhat, axis=-1, keepdims=True)
+                - x_hat * backend.np.sum(dxhat * x_hat, axis=-1, keepdims=True)
             )
             x.grad += dx
         out._backwards = _backward
@@ -842,9 +929,9 @@ class FeedForward:
 class Transformer:
     """The transformer block has no bridge. So demb = dmodel"""
     
-    def __init__(self, dmodel, n, dff = None):
+    def __init__(self, dmodel, n, dff = None,rope=None):
         self.ln1 = LayerNorm(dmodel)
-        self.attn = MultiHeadAttention(dinp=dmodel,dmodel=dmodel,dout=dmodel,n=n)
+        self.attn = MultiHeadAttention(dinp=dmodel,dmodel=dmodel,dout=dmodel,n=n,rope=rope)
         self.ln2 = LayerNorm(dmodel)
         self.ff  = FeedForward(dmodel=dmodel,dff=dff)
         
@@ -863,11 +950,11 @@ class Transformer:
         
 class PositionalEncoding:
     def __init__(self,max_len,dmodel):
-        pe = np.zeros((max_len,dmodel))
-        pos = np.arange(max_len).reshape(-1,1)
-        div = np.exp(np.arange(0, dmodel, 2) * (-np.log(10000.0) / dmodel))
-        pe[:,0::2] = np.sin(pos*div)
-        pe[:,1::2] = np.cos(pos*div)
+        pe = backend.np.zeros((max_len,dmodel))
+        pos = backend.np.arange(max_len).reshape(-1,1)
+        div = backend.np.exp(backend.np.arange(0, dmodel, 2) * (-backend.np.log(10000.0) / dmodel))
+        pe[:,0::2] = backend.np.sin(pos*div)
+        pe[:,1::2] = backend.np.cos(pos*div)
         self.pe = pe
         
     
@@ -877,4 +964,34 @@ class PositionalEncoding:
     
     def parameters(self):
         return []
- 
+        
+class RotatoryPositionalEncoding:
+    def __init__(self,max_len, dim, base=10000.0):
+        assert dim % 2 == 0, "RoPE dim must be even"
+        theta = 1.0/(base**(backend.np.arange(0,dim,2)/float(dim)))
+        m = backend.np.arange(max_len)
+        
+        freq = backend.np.outer(m,theta)
+        cos = backend.np.cos(freq)
+        sin = backend.np.sin(freq)
+        
+        self.cos = backend.np.concatenate([cos, cos], axis=-1)               
+        self.sin = backend.np.concatenate([sin, sin], axis=-1)
+        
+    def xbar(self,x):
+        d = x.shape[-1]
+        half = d // 2
+        
+        x1 = x[...,:half]
+        x2 = x[...,half:]
+        
+        return Tensor.cat((-x2,x1),axis=-1)
+    
+    def __call__(self,x:Tensor):
+        T = x.shape[-2]
+        cos = self.cos[:T]
+        sin = self.sin[:T]
+        return x*cos + self.xbar(x)*sin
+    
+    def parameters(self):
+        return []
