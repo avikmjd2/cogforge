@@ -387,10 +387,10 @@ class Tensor:
         flat, idx, rows = p.reshape(N, -1), target_ids.reshape(N), backend.np.arange(N)
         loss = cls(-backend.np.log(backend.np.clip(flat[rows, idx], 1e-15, 1.0)).sum() / N, children=(scores,))
         def _backward():
-            # g = p.reshape(N, -1).copy()
             g = p.reshape(N, -1)
-            g[rows, idx] -= 1.0                      # (softmax - onehot)
-            scores.grad += (g.reshape(scores.shape) / N) * loss.grad
+            g[rows, idx] -= 1.0
+            coef = numpy.float32(float(loss.grad) / N)      
+            _iadd_scaled(scores.grad, g.reshape(scores.shape), coef)
         loss._backwards = _backward
         return loss
     
